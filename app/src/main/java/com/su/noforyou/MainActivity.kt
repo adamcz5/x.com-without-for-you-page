@@ -41,8 +41,23 @@ class MainActivity : Activity() {
             setPadding(0, pad, 0, pad)
             setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(ForYouBlockerService.KEY_ENABLED, on).apply() }
         })
+        val holdLabel = TextView(this).apply { textSize = 16f }
+        fun showHold() { holdLabel.text = "Black screen for ${prefs.getInt(ForYouBlockerService.KEY_HOLD_SECONDS, ForYouBlockerService.DEFAULT_HOLD_SECONDS)} s when X opens" }
+        fun changeHold(d: Int) {
+            val v = (prefs.getInt(ForYouBlockerService.KEY_HOLD_SECONDS, ForYouBlockerService.DEFAULT_HOLD_SECONDS) + d).coerceIn(0, 15)
+            prefs.edit().putInt(ForYouBlockerService.KEY_HOLD_SECONDS, v).apply()
+            showHold()
+        }
+        showHold()
+        layout.addView(holdLabel)
+        layout.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(Button(this@MainActivity).apply { text = "  -  "; setOnClickListener { changeHold(-1) } })
+            addView(Button(this@MainActivity).apply { text = "  +  "; setOnClickListener { changeHold(1) } })
+        })
         layout.addView(TextView(this).apply {
             textSize = 14f
+            setPadding(0, pad, 0, 0)
             text = "First turn on the service: tap \"Open Accessibility settings\" and enable " +
                 "\"${getString(R.string.app_name)}\" (Installed / Downloaded apps)."
         })
@@ -102,6 +117,7 @@ class MainActivity : Activity() {
         status.text = "Service running: $running\n" +
             "Events seen: ${ForYouBlockerService.eventCount}\n" +
             "Last app in front: ${ForYouBlockerService.lastPackage.ifEmpty { "-" }}\n" +
+            "Last window event from: ${ForYouBlockerService.lastEventPackage.ifEmpty { "-" }}\n" +
             "To fill the report: open X for a few seconds, come back, tap Refresh."
         report.text = ForYouBlockerService.lastReport.ifEmpty { "(nothing from X yet)" }
     }

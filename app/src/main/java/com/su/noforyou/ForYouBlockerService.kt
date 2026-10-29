@@ -3,6 +3,9 @@ package com.su.noforyou
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Color
 import android.accessibilityservice.GestureDescription
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -25,24 +28,27 @@ class ForYouBlockerService : AccessibilityService() {
     private var pending = false
     private var overlay: View? = null
     private var overlayBounds = Rect()
-    private var lastAutoClick = 0L
-    private var tappedThisVisit = false
-    private var coveredThisVisit = false
+
+    private val screenOff = object : BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: Intent?) = xClosed()      // locked: next time X shows counts as a fresh open
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        registerReceiver(screenOff, IntentFilter(Intent.ACTION_SCREEN_OFF))
     }
 
-    override fun onUnbind(intent: android.content.Intent?): Boolean {
+    override fun onUnbind(intent: Intent?): Boolean {
         instance = null
+        try { unregisterReceiver(screenOff) } catch (e: Exception) { /* not registered */ }
         return super.onUnbind(intent)
     }
 
     private var startCover: View? = null
     private val hideStartCover = Runnable { removeStartCover() }
 
-    private fun showStartCover() {
+    private fun showStartCover(maxMs: Long) {
         if (startCover != null) return
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val params = WindowManager.LayoutParams(
@@ -55,7 +61,7 @@ class ForYouBlockerService : AccessibilityService() {
         val v = View(this).apply { setBackgroundColor(Color.BLACK) }
         wm.addView(v, params)
         startCover = v
-        handler.postDelayed(hideStartCover, START_COVER_MAX_MS)      // never stay black for long, whatever happens
+        handler.postDelayed(hideStartCover, maxMs)      // never stay black for long, whatever happens
     }
 
     private fun removeStartCover() {
@@ -76,11 +82,50 @@ class ForYouBlockerService : AccessibilityService() {
         update()
     }
 
+    private var inX = false
+    private val redirect = Runnable {
+        tapFollowing()
+        handler.postDelayed(hideStartCover, AFTER_TAP_MS)      // show the screen again once Following is up
+    }
+
+    private fun enabled() = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_ENABLED, true)
+
+    /** Windows that can appear on top of X without X being left (our own covers, the status bar, the keyboard). */
+    private fun isIgnored(pkg: String) =
+        pkg == packageName || pkg.startsWith("com.android.systemui") || pkg == "android" ||
+            pkg.contains("inputmethod") || pkg.contains("honeyboard")
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         eventCount++
+        val e = event ?: return
+        val pkg = e.packageName?.toString()
+        if (pkg != null && e.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && !isIgnored(pkg)) {
+            lastEventPackage = pkg
+            if (pkg == X_PACKAGE) {
+                if (!inX) xOpened()
+            } else if (inX) {
+                xClosed()
+            }
+        }
         if (pending) return
         pending = true
         handler.postDelayed(process, DEBOUNCE_MS)
+    }
+
+    /** X came to the front: black screen for the set time (leave X meanwhile if you like), then switch to Following. */
+    private fun xOpened() {
+        if (!enabled()) return
+        inX = true
+        val holdMs = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_HOLD_SECONDS, DEFAULT_HOLD_SECONDS) * 1000L
+        showStartCover(holdMs + START_COVER_EXTRA_MS)
+        handler.postDelayed(redirect, holdMs)
+    }
+
+    private fun xClosed() {
+        inX = false
+        handler.removeCallbacks(redirect)
+        removeStartCover()
+        removeOverlay()
     }
 
     override fun onInterrupt() = removeOverlay()
@@ -93,7 +138,7 @@ class ForYouBlockerService : AccessibilityService() {
     }
 
     private fun update() {
-        if (!getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_ENABLED, true)) {      // switched off in the app
+        if (!enabled()) {      // switched off in the app
             removeOverlay()
             return
         }
@@ -101,19 +146,12 @@ class ForYouBlockerService : AccessibilityService() {
         lastPackage = root?.packageName?.toString() ?: "(no window)"
         if (root == null || root.packageName != X_PACKAGE) {
             removeOverlay()
-            removeStartCover()
-            tappedThisVisit = false      // next time X comes to the front, switch to Following again
-            coveredThisVisit = false
             return
         }
-        if (!coveredThisVisit) {      // X just opened: black screen until we are on Following (once per visit)
-            coveredThisVisit = true
-            showStartCover()
-        }
         val forYou = FOR_YOU.firstNotNullOfOrNull { findTab(root, it) }
-        val now0 = System.currentTimeMillis()
-        if (now0 - lastDumpAt > DUMP_EVERY_MS) {      // keep a readable copy of what X shows, for the in-app report
-            lastDumpAt = now0
+        val now = System.currentTimeMillis()
+        if (now - lastDumpAt > DUMP_EVERY_MS) {      // keep a readable copy of what X shows, for the in-app report
+            lastDumpAt = now
             lastReport = "For you tab found: ${forYou != null}\n\nNODES MENTIONING For you / Following:\n" +
                 scanTabs(root) + "\nALL TEXT ON SCREEN:\n" + dump(root)
         }
@@ -126,24 +164,25 @@ class ForYouBlockerService : AccessibilityService() {
         }
         hidePending = false
         handler.removeCallbacks(hide)
-        val bounds = Rect().also { forYou.getBoundsInScreen(it) }
-        showOverlay(bounds)
-
-        // X does not mark the selected tab, so: tap "Following" once per visit to X, and again whenever For you reports selected
-        val now = System.currentTimeMillis()
-        if ((!tappedThisVisit || isSelected(forYou)) && now - lastAutoClick > AUTO_CLICK_COOLDOWN_MS) {
-            FOLLOWING.firstNotNullOfOrNull { findFollowingInRow(root, it, bounds) }?.let {
-                lastAutoClick = now
-                tappedThisVisit = true
-                tap(it)
-                handler.postDelayed(hideStartCover, AFTER_TAP_MS)      // show the screen again once Following is up
-            }
-        }
+        showOverlay(Rect().also { forYou.getBoundsInScreen(it) })      // black box over the "For you" tab (best effort)
     }
 
-    private fun tap(node: AccessibilityNodeInfo) {
-        val b = Rect().also { node.getBoundsInScreen(it) }
-        val path = Path().apply { moveTo(b.exactCenterX(), b.exactCenterY()) }
+    /** Tap "Following": where X says it is, or (if X cannot be read) where it sits on this phone's screen. */
+    private fun tapFollowing() {
+        val m = resources.displayMetrics
+        var x = m.widthPixels * 0.67f
+        var y = m.heightPixels * 0.15f
+        val root = rootInActiveWindow
+        if (root != null && root.packageName == X_PACKAGE) {
+            val row = FOR_YOU.firstNotNullOfOrNull { findTab(root, it) }?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
+            val following = row?.let { r -> FOLLOWING.firstNotNullOfOrNull { findFollowingInRow(root, it, r) } }
+            if (following != null) {
+                val b = Rect().also { following.getBoundsInScreen(it) }
+                x = b.exactCenterX()
+                y = b.exactCenterY()
+            }
+        }
+        val path = Path().apply { moveTo(x, y) }
         dispatchGesture(
             GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build(),
             null, null
@@ -268,10 +307,13 @@ class ForYouBlockerService : AccessibilityService() {
         @Volatile var instance: ForYouBlockerService? = null
         @Volatile var eventCount = 0
         @Volatile var lastPackage = ""
+        @Volatile var lastEventPackage = ""
         @Volatile var lastReport = ""
         private var lastDumpAt = 0L
         const val PREFS = "prefs"
         const val KEY_ENABLED = "enabled"
+        const val KEY_HOLD_SECONDS = "hold_seconds"
+        const val DEFAULT_HOLD_SECONDS = 2
         private const val DUMP_EVERY_MS = 1500L
         private const val X_PACKAGE = "com.twitter.android"
         // Tab labels in X's interface languages (the service matches by label, so the phone/app language matters)
@@ -279,8 +321,7 @@ class ForYouBlockerService : AccessibilityService() {
         private val FOLLOWING = listOf("Following", "Sledujete", "Sledované", "Folge ich", "Obserwowani", "Siguiendo", "Abonnements", "Seguiti", "Seguindo", "Volgend")
         private const val DEBOUNCE_MS = 80L
         private const val HIDE_DELAY_MS = 450L
-        private const val AUTO_CLICK_COOLDOWN_MS = 1000L
-        private const val START_COVER_MAX_MS = 4000L
+        private const val START_COVER_EXTRA_MS = 4000L
         private const val AFTER_TAP_MS = 700L
     }
 }
