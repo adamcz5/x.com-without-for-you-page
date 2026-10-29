@@ -70,7 +70,8 @@ class ForYouBlockerService : AccessibilityService() {
         val now0 = System.currentTimeMillis()
         if (now0 - lastDumpAt > DUMP_EVERY_MS) {      // keep a readable copy of what X shows, for the in-app report
             lastDumpAt = now0
-            lastReport = "For you tab found: ${forYou != null}\n\n" + dump(root)
+            lastReport = "For you tab found: ${forYou != null}\n\nNODES MENTIONING For you / Following:\n" +
+                scanTabs(root) + "\nALL TEXT ON SCREEN:\n" + dump(root)
         }
         if (forYou == null) {
             removeOverlay()
@@ -89,6 +90,25 @@ class ForYouBlockerService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    /** Every node whose text or description mentions the tab names, with its details. */
+    private fun scanTabs(root: AccessibilityNodeInfo): String {
+        val sb = StringBuilder()
+        fun walk(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+            val t = node.text?.toString().orEmpty()
+            val d = node.contentDescription?.toString().orEmpty()
+            val all = "$t $d".lowercase()
+            if ("for you" in all || "following" in all) {
+                val b = Rect().also { node.getBoundsInScreen(it) }
+                sb.append("text='$t' desc='$d' class=${node.className} visible=${node.isVisibleToUser} " +
+                    "clickable=${node.isClickable} selected=${node.isSelected} @${b.toShortString()}\n")
+            }
+            for (i in 0 until node.childCount) walk(node.getChild(i))
+        }
+        walk(root)
+        return sb.toString().ifEmpty { "(no node mentions them)\n" }
     }
 
     /** Text and descriptions of everything X exposes on screen (capped), one per line. */
@@ -115,12 +135,15 @@ class ForYouBlockerService : AccessibilityService() {
     private fun label(node: AccessibilityNodeInfo): String =
         (node.text ?: node.contentDescription)?.toString()?.trim().orEmpty()
 
-    /** A visible node whose label is the tab name (optionally followed by ", selected" etc.). */
-    private fun findTab(root: AccessibilityNodeInfo, name: String): AccessibilityNodeInfo? =
-        root.findAccessibilityNodeInfosByText(name).firstOrNull {
+    /** A visible node near the top whose label starts with the tab name (e.g. "For you", "For you, tab 1 of 2"). */
+    private fun findTab(root: AccessibilityNodeInfo, name: String): AccessibilityNodeInfo? {
+        val maxTop = resources.displayMetrics.heightPixels * 0.3
+        return root.findAccessibilityNodeInfosByText(name).firstOrNull {
             val l = label(it)
-            it.isVisibleToUser && (l.equals(name, ignoreCase = true) || l.startsWith("$name,", ignoreCase = true))
+            val top = Rect().also { r -> it.getBoundsInScreen(r) }.top
+            it.isVisibleToUser && l.startsWith(name, ignoreCase = true) && l.length <= name.length + 40 && top < maxTop
         }
+    }
 
     /** "Following" also appears elsewhere (profiles, buttons), so only accept the one in the same row as "For you". */
     private fun findFollowingInRow(root: AccessibilityNodeInfo, row: Rect): AccessibilityNodeInfo? =
