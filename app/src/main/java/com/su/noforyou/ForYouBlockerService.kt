@@ -2,6 +2,8 @@ package com.su.noforyou
 
 import android.accessibilityservice.AccessibilityService
 import android.graphics.Color
+import android.accessibilityservice.GestureDescription
+import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.os.Handler
@@ -24,6 +26,7 @@ class ForYouBlockerService : AccessibilityService() {
     private var overlay: View? = null
     private var overlayBounds = Rect()
     private var lastAutoClick = 0L
+    private var tappedThisVisit = false
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -64,6 +67,7 @@ class ForYouBlockerService : AccessibilityService() {
         lastPackage = root?.packageName?.toString() ?: "(no window)"
         if (root == null || root.packageName != X_PACKAGE) {
             removeOverlay()
+            tappedThisVisit = false      // next time X comes to the front, switch to Following again
             return
         }
         val forYou = FOR_YOU.firstNotNullOfOrNull { findTab(root, it) }
@@ -77,19 +81,27 @@ class ForYouBlockerService : AccessibilityService() {
             removeOverlay()
             return
         }
-        val tab = clickableAncestor(forYou)
-        val bounds = Rect().also { tab.getBoundsInScreen(it) }
+        val bounds = Rect().also { forYou.getBoundsInScreen(it) }
         showOverlay(bounds)
 
-        if (isSelected(forYou) || isSelected(tab)) {
-            val now = System.currentTimeMillis()
-            if (now - lastAutoClick > AUTO_CLICK_COOLDOWN_MS) {
-                findFollowingInRow(root, bounds)?.let {
-                    lastAutoClick = now
-                    clickableAncestor(it).performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                }
+        // X does not mark the selected tab, so: tap "Following" once per visit to X, and again whenever For you reports selected
+        val now = System.currentTimeMillis()
+        if ((!tappedThisVisit || isSelected(forYou)) && now - lastAutoClick > AUTO_CLICK_COOLDOWN_MS) {
+            FOLLOWING.firstNotNullOfOrNull { findFollowingInRow(root, it, bounds) }?.let {
+                lastAutoClick = now
+                tappedThisVisit = true
+                tap(it)
             }
         }
+    }
+
+    private fun tap(node: AccessibilityNodeInfo) {
+        val b = Rect().also { node.getBoundsInScreen(it) }
+        val path = Path().apply { moveTo(b.exactCenterX(), b.exactCenterY()) }
+        dispatchGesture(
+            GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build(),
+            null, null
+        )
     }
 
     /** Every node whose text or description mentions the tab names, with its details. */
@@ -135,35 +147,38 @@ class ForYouBlockerService : AccessibilityService() {
     private fun label(node: AccessibilityNodeInfo): String =
         (node.text ?: node.contentDescription)?.toString()?.trim().orEmpty()
 
-    /** A visible node near the top whose label starts with the tab name (e.g. "For you", "For you, tab 1 of 2"). */
+    /** All visible nodes whose label starts with [name] (own tree walk: the system's text search missed X's tabs). */
+    private fun findNodes(root: AccessibilityNodeInfo, name: String): List<AccessibilityNodeInfo> {
+        val out = ArrayList<AccessibilityNodeInfo>()
+        fun walk(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+            val l = label(node)
+            if (node.isVisibleToUser && l.startsWith(name, ignoreCase = true) && l.length <= name.length + 40) out.add(node)
+            for (i in 0 until node.childCount) walk(node.getChild(i))
+        }
+        walk(root)
+        return out
+    }
+
+    private fun area(node: AccessibilityNodeInfo): Int {
+        val r = Rect().also { node.getBoundsInScreen(it) }
+        return r.width() * r.height()
+    }
+
+    /** The tab near the top of the screen; of several matches (the tab view and its text) the biggest one. */
     private fun findTab(root: AccessibilityNodeInfo, name: String): AccessibilityNodeInfo? {
         val maxTop = resources.displayMetrics.heightPixels * 0.3
-        return root.findAccessibilityNodeInfosByText(name).firstOrNull {
-            val l = label(it)
-            val top = Rect().also { r -> it.getBoundsInScreen(r) }.top
-            it.isVisibleToUser && l.startsWith(name, ignoreCase = true) && l.length <= name.length + 40 && top < maxTop
-        }
+        return findNodes(root, name)
+            .filter { Rect().also { r -> it.getBoundsInScreen(r) }.top < maxTop }
+            .maxByOrNull { area(it) }
     }
 
-    /** "Following" also appears elsewhere (profiles, buttons), so only accept the one in the same row as "For you". */
-    private fun findFollowingInRow(root: AccessibilityNodeInfo, row: Rect): AccessibilityNodeInfo? =
-        FOLLOWING.firstNotNullOfOrNull { name ->
-            root.findAccessibilityNodeInfosByText(name).firstOrNull {
-                val b = Rect().also { r -> it.getBoundsInScreen(r) }
-                it.isVisibleToUser && label(it).startsWith(name, ignoreCase = true) &&
-                    b.centerY() in row.top..row.bottom && b.left >= row.right - 1
-            }
-        }
-
-    private fun clickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
-        var n: AccessibilityNodeInfo? = node
-        repeat(4) {
-            if (n == null) return node
-            if (n!!.isClickable) return n!!
-            n = n!!.parent
-        }
-        return node
-    }
+    /** "Following" also appears elsewhere (profiles, buttons), so only accept the one in the same row, right of "For you". */
+    private fun findFollowingInRow(root: AccessibilityNodeInfo, name: String, row: Rect): AccessibilityNodeInfo? =
+        findNodes(root, name).filter {
+            val b = Rect().also { r -> it.getBoundsInScreen(r) }
+            b.centerY() in row.top..row.bottom && b.left >= row.right - 1
+        }.maxByOrNull { area(it) }
 
     private fun isSelected(node: AccessibilityNodeInfo): Boolean =
         node.isSelected || node.parent?.isSelected == true
