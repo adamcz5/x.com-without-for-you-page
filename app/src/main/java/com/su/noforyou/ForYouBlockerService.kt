@@ -38,6 +38,12 @@ class ForYouBlockerService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
+    private var hidePending = false
+    private val hide = Runnable {
+        hidePending = false
+        removeOverlay()
+    }
+
     private val process = Runnable {
         pending = false
         update()
@@ -78,9 +84,14 @@ class ForYouBlockerService : AccessibilityService() {
                 scanTabs(root) + "\nALL TEXT ON SCREEN:\n" + dump(root)
         }
         if (forYou == null) {
-            removeOverlay()
+            if (overlay != null && !hidePending) {      // X redraws its header a lot; only hide if it stays gone
+                hidePending = true
+                handler.postDelayed(hide, HIDE_DELAY_MS)
+            }
             return
         }
+        hidePending = false
+        handler.removeCallbacks(hide)
         val bounds = Rect().also { forYou.getBoundsInScreen(it) }
         showOverlay(bounds)
 
@@ -190,6 +201,7 @@ class ForYouBlockerService : AccessibilityService() {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -231,6 +243,7 @@ class ForYouBlockerService : AccessibilityService() {
         private val FOR_YOU = listOf("For you", "Pro vás", "Pre vás", "Für dich", "Dla Ciebie", "Para ti", "Pour vous", "Per te", "Para você", "Voor jou")
         private val FOLLOWING = listOf("Following", "Sledujete", "Sledované", "Folge ich", "Obserwowani", "Siguiendo", "Abonnements", "Seguiti", "Seguindo", "Volgend")
         private const val DEBOUNCE_MS = 80L
+        private const val HIDE_DELAY_MS = 450L
         private const val AUTO_CLICK_COOLDOWN_MS = 1000L
     }
 }
