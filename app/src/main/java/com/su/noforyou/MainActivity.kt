@@ -34,27 +34,42 @@ class MainActivity : Activity() {
             textSize = 20f
             text = getString(R.string.app_name)
         })
-        layout.addView(Switch(this).apply {
-            text = "Block the For You tab"
+        fun toggle(label: String, key: String) = Switch(this).apply {
+            text = label
             textSize = 16f
-            isChecked = prefs.getBoolean(ForYouBlockerService.KEY_ENABLED, true)
-            setPadding(0, pad, 0, pad)
-            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(ForYouBlockerService.KEY_ENABLED, on).apply() }
-        })
-        val holdLabel = TextView(this).apply { textSize = 16f }
-        fun showHold() { holdLabel.text = "Black screen for ${prefs.getInt(ForYouBlockerService.KEY_HOLD_SECONDS, ForYouBlockerService.DEFAULT_HOLD_SECONDS)} s when X opens" }
-        fun changeHold(d: Int) {
-            val v = (prefs.getInt(ForYouBlockerService.KEY_HOLD_SECONDS, ForYouBlockerService.DEFAULT_HOLD_SECONDS) + d).coerceIn(0, 15)
-            prefs.edit().putInt(ForYouBlockerService.KEY_HOLD_SECONDS, v).apply()
-            showHold()
+            isChecked = prefs.getBoolean(key, true)
+            setPadding(0, pad / 2, 0, pad / 2)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(key, on).apply() }
         }
-        showHold()
-        layout.addView(holdLabel)
-        layout.addView(LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(Button(this@MainActivity).apply { text = "  -  "; setOnClickListener { changeHold(-1) } })
-            addView(Button(this@MainActivity).apply { text = "  +  "; setOnClickListener { changeHold(1) } })
-        })
+        // a "- N +" picker for a number of seconds
+        fun picker(label: (Int) -> String, key: String, default: Int, max: Int): LinearLayout {
+            val text = TextView(this).apply { textSize = 15f; setPadding(0, pad / 2, 0, 0) }
+            fun show() { text.text = label(prefs.getInt(key, default)) }
+            fun change(d: Int) {
+                prefs.edit().putInt(key, (prefs.getInt(key, default) + d).coerceIn(0, max)).apply()
+                show()
+            }
+            show()
+            return LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(text)
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(Button(this@MainActivity).apply { this.text = "  -  "; setOnClickListener { change(-1) } })
+                    addView(Button(this@MainActivity).apply { this.text = "  +  "; setOnClickListener { change(1) } })
+                })
+            }
+        }
+        layout.addView(toggle("Black screen (hides the For You page)", ForYouBlockerService.KEY_BLACK))
+        layout.addView(toggle("Redirect to Following", ForYouBlockerService.KEY_REDIRECT))
+        layout.addView(picker(
+            { "After opening X, wait $it s, then go to Following" },
+            ForYouBlockerService.KEY_OPEN_SECONDS, ForYouBlockerService.DEFAULT_OPEN_SECONDS, 15
+        ))
+        layout.addView(picker(
+            { "After you land on For you again, wait $it s, then go back to Following" },
+            ForYouBlockerService.KEY_BACK_SECONDS, ForYouBlockerService.DEFAULT_BACK_SECONDS, 10
+        ))
         layout.addView(TextView(this).apply {
             textSize = 14f
             setPadding(0, pad, 0, 0)
@@ -118,6 +133,7 @@ class MainActivity : Activity() {
             "Events seen: ${ForYouBlockerService.eventCount}\n" +
             "Last app in front: ${ForYouBlockerService.lastPackage.ifEmpty { "-" }}\n" +
             "Last window event from: ${ForYouBlockerService.lastEventPackage.ifEmpty { "-" }}\n" +
+            "Last tap: ${ForYouBlockerService.lastTap}\n" +
             "To fill the report: open X for a few seconds, come back, tap Refresh."
         report.text = ForYouBlockerService.lastReport.ifEmpty { "(nothing from X yet)" }
     }

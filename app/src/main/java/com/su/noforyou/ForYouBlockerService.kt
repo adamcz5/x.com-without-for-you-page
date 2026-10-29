@@ -1,11 +1,12 @@
 package com.su.noforyou
 
 import android.accessibilityservice.AccessibilityService
-import android.graphics.Color
+import android.accessibilityservice.AccessibilityService.GestureResultCallback
 import android.accessibilityservice.GestureDescription
 import android.content.BroadcastReceiver
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -19,9 +20,11 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * While the X app is in the foreground: covers the "For you" tab with an overlay that swallows
- * taps, and taps "Following" whenever "For you" ends up selected. Only the package name of other
- * apps is looked at; nothing is stored or sent anywhere.
+ * Keeps X on "Following". While the X app is in front:
+ *  - black screen (option): over the middle of the screen while the "For you" page is showing, and for a set time after X opens
+ *  - redirect (option): taps "Following" a set time after X opens, and again a set time after you land on "For you"
+ * "For you" is showing when its tab is the wider of the two tabs (the active tab carries the little dropdown arrow).
+ * Nothing is stored or sent anywhere.
  */
 class ForYouBlockerService : AccessibilityService() {
 
@@ -46,13 +49,22 @@ class ForYouBlockerService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
+    // ---- settings (changed in the app)
+    private fun prefs() = getSharedPreferences(PREFS, MODE_PRIVATE)
+    private fun black() = prefs().getBoolean(KEY_BLACK, true)
+    private fun redirectOn() = prefs().getBoolean(KEY_REDIRECT, true)
+    private fun enabled() = black() || redirectOn()
+    private fun openMs() = prefs().getInt(KEY_OPEN_SECONDS, DEFAULT_OPEN_SECONDS) * 1000L
+    private fun backMs() = prefs().getInt(KEY_BACK_SECONDS, DEFAULT_BACK_SECONDS) * 1000L
+
+    // ---- the black screen over the middle of X (profile / X logo row and bottom menu stay visible)
     private var startCover: View? = null
+    private var coverParams: WindowManager.LayoutParams? = null
     private val hideStartCover = Runnable { removeStartCover() }
 
-    private fun showStartCover(maxMs: Long) {
+    private fun showStartCover() {
         if (startCover != null) return
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        // black over the middle only: the top bar (profile, X logo) and the bottom menu stay visible
         val h = if (Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds.height() else resources.displayMetrics.heightPixels
         val top = (h * COVER_TOP).toInt()
         val params = WindowManager.LayoutParams(
@@ -68,7 +80,8 @@ class ForYouBlockerService : AccessibilityService() {
         val v = View(this).apply { setBackgroundColor(Color.BLACK) }
         wm.addView(v, params)
         startCover = v
-        handler.postDelayed(hideStartCover, maxMs)      // never stay black for long, whatever happens
+        coverParams = params
+        handler.postDelayed(hideStartCover, COVER_MAX_MS)      // never stay black for long, whatever happens
     }
 
     private fun removeStartCover() {
@@ -78,20 +91,32 @@ class ForYouBlockerService : AccessibilityService() {
         startCover = null
     }
 
+    private fun coverNow(want: Boolean) {
+        if (want) showStartCover() else removeStartCover()
+    }
+
+    /** The cover catches touches; while our own tap on "Following" is sent it must let them through. */
+    private fun setCoverTouchable(on: Boolean) {
+        val v = startCover ?: return
+        val p = coverParams ?: return
+        p.flags = if (on) p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        else p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        (getSystemService(WINDOW_SERVICE) as WindowManager).updateViewLayout(v, p)
+    }
+
+    // ---- when to do what
+    private var inX = false
+    private var tabTopMax = 0
+    private var openUntil = 0L              // X was just opened: until then the page counts as "For you"
+    private var openRedirectPending = false
+    private var redirectAt = 0L             // when to tap Following (0 = nothing planned)
+    private var holdOffUntil = 0L           // just after our tap: leave the cover as it is while the page switches
+
     private val process = Runnable {
         pending = false
         update()
     }
-
-    private var inX = false
-    private var tabTopMax = 0
-    private var lastForce = 0L
-    private val redirect = Runnable {
-        tapFollowing()
-        handler.postDelayed(hideStartCover, AFTER_TAP_MS)      // show the screen again once Following is up
-    }
-
-    private fun enabled() = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_ENABLED, true)
+    private val openEnd = Runnable { update() }
 
     /** Windows that can appear on top of X without X being left (our own covers, the status bar, the keyboard). */
     private fun isIgnored(pkg: String) =
@@ -115,19 +140,25 @@ class ForYouBlockerService : AccessibilityService() {
         handler.postDelayed(process, DEBOUNCE_MS)
     }
 
-    /** X came to the front: black screen for the set time (leave X meanwhile if you like), then switch to Following. */
+    /** X came to the front: black screen (if on) for the set time, then the redirect (if on). */
     private fun xOpened() {
         if (!enabled()) return
         inX = true
-        val holdMs = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_HOLD_SECONDS, DEFAULT_HOLD_SECONDS) * 1000L
-        showStartCover(holdMs + START_COVER_EXTRA_MS)
-        handler.postDelayed(redirect, holdMs)
+        openUntil = System.currentTimeMillis() + openMs()
+        openRedirectPending = true
+        redirectAt = 0L
+        holdOffUntil = 0L
+        if (black()) showStartCover()
+        handler.postDelayed(openEnd, openMs() + 50)      // look again when the opening time is over
     }
 
     private fun xClosed() {
         inX = false
         tabTopMax = 0
-        handler.removeCallbacks(redirect)
+        openUntil = 0L
+        openRedirectPending = false
+        redirectAt = 0L
+        handler.removeCallbacks(openEnd)
         removeStartCover()
         removeOverlay()
     }
@@ -136,55 +167,81 @@ class ForYouBlockerService : AccessibilityService() {
 
     override fun onDestroy() {
         handler.removeCallbacks(process)
+        handler.removeCallbacks(openEnd)
         removeOverlay()
         removeStartCover()
         super.onDestroy()
     }
 
     private fun update() {
-        if (!enabled()) {      // switched off in the app
+        if (!enabled()) {      // both options off in the app
             removeOverlay()
+            removeStartCover()
             return
         }
+        val now = System.currentTimeMillis()
+        val opening = now < openUntil
         val root = rootInActiveWindow
         lastPackage = root?.packageName?.toString() ?: "(no window)"
         if (root == null || root.packageName != X_PACKAGE) {
             removeOverlay()
             tabTopMax = 0
+            if (inX && now >= holdOffUntil) coverNow(black() && opening)      // cannot read X: only the opening time applies
+            if (opening && !pending) { pending = true; handler.postDelayed(process, RECHECK_MS) }
             return
         }
         val forYou = FOR_YOU.firstNotNullOfOrNull { findTab(root, it) }
-        val now = System.currentTimeMillis()
         val bounds = forYou?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
         val followingBounds = bounds?.let { row ->
             FOLLOWING.firstNotNullOfOrNull { findFollowingInRow(root, it, row) }?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
         }
+        // "For you" is the page showing when its tab is the wider one; null = cannot tell (header not on screen)
+        val forYouShowing: Boolean? =
+            if (bounds != null && followingBounds != null) bounds.width() > followingBounds.width() + TAB_WIDTH_MARGIN else null
         if (now - lastDumpAt > DUMP_EVERY_MS) {      // keep a readable copy of what X shows, for the in-app report
             lastDumpAt = now
             lastReport = "For you tab found: ${forYou != null}\n" +
-                "Tab widths: For you=${bounds?.width()} Following=${followingBounds?.width()} (the wider one is the active tab)\n\n" +
+                "Tab widths: For you=${bounds?.width()} Following=${followingBounds?.width()} (the wider one is the active tab)\n" +
+                "For you page showing: ${forYouShowing ?: "unknown"}\n\n" +
                 "NODES MENTIONING For you / Following:\n" + scanTabs(root) + "\nALL TEXT ON SCREEN:\n" + dump(root)
         }
-        if (bounds == null) {      // header scrolled away: no box
-            removeOverlay()
-            return
-        }
-        if (bounds.top > tabTopMax) tabTopMax = bounds.top      // the highest position seen is the default one
-        if (bounds.top < tabTopMax - MOVED_PX) {      // header is moving (scrolling): drop the box until it is back in place
-            removeOverlay()
-            return
-        }
-        showOverlay(bounds)      // black box over the "For you" tab
 
-        // swiped over to the For you page (its tab is the wider one): black out and go back to Following
-        if (followingBounds != null && startCover == null &&
-            bounds.width() > followingBounds.width() + TAB_WIDTH_MARGIN && now - lastForce > FORCE_COOLDOWN_MS
-        ) {
-            lastForce = now
-            showStartCover(FORCE_COVER_MAX_MS)
-            tapFollowing()
-            handler.postDelayed(hideStartCover, AFTER_TAP_MS)
+        // black screen: while opening, and while the For you page is showing
+        if (now >= holdOffUntil) coverNow(black() && (opening || forYouShowing == true))
+
+        // redirect
+        if (redirectOn()) {
+            if (openRedirectPending && !opening) {      // the opening time is over
+                openRedirectPending = false
+                if (forYouShowing != false) redirectNow(now)
+            } else if (!opening) {
+                if (forYouShowing == true && redirectAt == 0L && now >= holdOffUntil) redirectAt = now + backMs()      // landed on For you
+                if (forYouShowing == false) redirectAt = 0L
+                if (redirectAt != 0L && now >= redirectAt) redirectNow(now)
+            }
+        } else {
+            openRedirectPending = false
         }
+
+        // small black box over the "For you" tab, only while the header is in its default position
+        if (bounds == null) {
+            removeOverlay()
+        } else {
+            if (bounds.top > tabTopMax) tabTopMax = bounds.top
+            if (bounds.top < tabTopMax - MOVED_PX) removeOverlay() else showOverlay(bounds)
+        }
+
+        if ((opening || redirectAt != 0L || openRedirectPending) && !pending) {      // come back while a timer runs
+            pending = true
+            handler.postDelayed(process, RECHECK_MS)
+        }
+    }
+
+    private fun redirectNow(now: Long) {
+        redirectAt = 0L
+        holdOffUntil = now + HOLD_OFF_MS
+        tapFollowing()
+        handler.postDelayed(hideStartCover, AFTER_TAP_MS)      // show the screen again once Following is up
     }
 
     /** Tap "Following": where X says it is, or (if X cannot be read) where it sits on this phone's screen. */
@@ -203,10 +260,16 @@ class ForYouBlockerService : AccessibilityService() {
             }
         }
         val path = Path().apply { moveTo(x, y) }
-        dispatchGesture(
+        setCoverTouchable(false)
+        val sent = dispatchGesture(
             GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build(),
-            null, null
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) = setCoverTouchable(true)
+                override fun onCancelled(gestureDescription: GestureDescription?) = setCoverTouchable(true)
+            }, null
         )
+        lastTap = "tap at ${x.toInt()},${y.toInt()} sent=$sent"
+        handler.postDelayed({ setCoverTouchable(true) }, 800)      // in case no callback comes
     }
 
     /** Every node whose text or description mentions the tab names, with its details. */
@@ -328,12 +391,16 @@ class ForYouBlockerService : AccessibilityService() {
         @Volatile var eventCount = 0
         @Volatile var lastPackage = ""
         @Volatile var lastEventPackage = ""
+        @Volatile var lastTap = "-"
         @Volatile var lastReport = ""
         private var lastDumpAt = 0L
         const val PREFS = "prefs"
-        const val KEY_ENABLED = "enabled"
-        const val KEY_HOLD_SECONDS = "hold_seconds"
-        const val DEFAULT_HOLD_SECONDS = 2
+        const val KEY_BLACK = "black"
+        const val KEY_REDIRECT = "redirect"
+        const val KEY_OPEN_SECONDS = "open_seconds"
+        const val KEY_BACK_SECONDS = "back_seconds"
+        const val DEFAULT_OPEN_SECONDS = 2
+        const val DEFAULT_BACK_SECONDS = 1
         private const val DUMP_EVERY_MS = 1500L
         private const val X_PACKAGE = "com.twitter.android"
         // Tab labels in X's interface languages (the service matches by label, so the phone/app language matters)
@@ -344,9 +411,9 @@ class ForYouBlockerService : AccessibilityService() {
         private const val COVER_BOTTOM = 0.872f     // and ends above the bottom menu
         private const val MOVED_PX = 6
         private const val TAB_WIDTH_MARGIN = 15
-        private const val FORCE_COOLDOWN_MS = 1500L
-        private const val FORCE_COVER_MAX_MS = 3000L
-        private const val START_COVER_EXTRA_MS = 4000L
+        private const val COVER_MAX_MS = 60000L
+        private const val HOLD_OFF_MS = 900L
+        private const val RECHECK_MS = 250L
         private const val AFTER_TAP_MS = 700L
     }
 }
