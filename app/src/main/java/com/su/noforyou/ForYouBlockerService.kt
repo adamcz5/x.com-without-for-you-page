@@ -105,6 +105,7 @@ class ForYouBlockerService : AccessibilityService() {
     // ---- when to do what
     private var inX = false
     private var tabTopMax = 0
+    private var openedAt = 0L
     private var openUntil = 0L              // X was just opened: until then the page counts as "For you"
     private var openRedirectPending = false
     private var redirectAt = 0L             // when to tap Following (0 = nothing planned)
@@ -142,11 +143,12 @@ class ForYouBlockerService : AccessibilityService() {
     private fun xOpened() {
         if (!enabled()) return
         inX = true
-        openUntil = System.currentTimeMillis() + openMs()
+        openedAt = System.currentTimeMillis()
+        openUntil = openedAt + openMs()
         openRedirectPending = true
         redirectAt = 0L
         holdOffUntil = 0L
-        if (black()) showStartCover()
+        // no black screen yet: if X opens straight on Following nothing is needed, update() decides once it can read the tabs
         handler.postDelayed(openEnd, openMs() + 50)      // look again when the opening time is over
     }
 
@@ -184,7 +186,7 @@ class ForYouBlockerService : AccessibilityService() {
         if (root == null || root.packageName != X_PACKAGE) {
             removeOverlay()
             tabTopMax = 0
-            if (inX && now >= holdOffUntil) coverNow(black() && opening)      // cannot read X: only the opening time applies
+            if (inX && now >= holdOffUntil) coverNow(black() && opening && now - openedAt >= OPEN_GRACE_MS)      // cannot read X yet: after a short grace time assume the worst
             if (opening && !pending) { pending = true; handler.postDelayed(process, RECHECK_MS) }
             return
         }
@@ -193,9 +195,16 @@ class ForYouBlockerService : AccessibilityService() {
         val followingBounds = bounds?.let { row ->
             FOLLOWING.firstNotNullOfOrNull { findFollowingInRow(root, it, row) }?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
         }
-        // "For you" is the page showing when its tab is the wider one; null = cannot tell (header not on screen)
+        // "For you" is the page showing when its tab is the wider one, Following when that one is; null = cannot tell
         val forYouShowing: Boolean? =
-            if (bounds != null && followingBounds != null) bounds.width() > followingBounds.width() + TAB_WIDTH_MARGIN else null
+            if (bounds != null && followingBounds != null) {
+                val d = bounds.width() - followingBounds.width()
+                when {
+                    d > TAB_WIDTH_MARGIN -> true
+                    d < -TAB_WIDTH_MARGIN -> false
+                    else -> null
+                }
+            } else null
         if (now - lastDumpAt > DUMP_EVERY_MS) {      // keep a readable copy of what X shows, for the in-app report
             lastDumpAt = now
             lastReport = "For you tab found: ${forYou != null}\n" +
@@ -204,8 +213,9 @@ class ForYouBlockerService : AccessibilityService() {
                 "NODES MENTIONING For you / Following:\n" + scanTabs(root) + "\nALL TEXT ON SCREEN:\n" + dump(root)
         }
 
-        // black screen: while opening, and while the For you page is showing
-        if (now >= holdOffUntil) coverNow(black() && (opening || forYouShowing == true))
+        // black screen: only while the For you page is showing (or, just after X opened, while we cannot tell yet)
+        if (forYouShowing == false) openRedirectPending = false      // X opened straight on Following: nothing to do
+        if (now >= holdOffUntil) coverNow(black() && (forYouShowing == true || (opening && forYouShowing == null && now - openedAt >= OPEN_GRACE_MS)))
 
         // redirect
         if (redirectOn()) {
@@ -221,13 +231,9 @@ class ForYouBlockerService : AccessibilityService() {
             openRedirectPending = false
         }
 
-        // small black box over the "For you" tab, only while the header is in its default position
-        if (bounds == null) {
-            removeOverlay()
-        } else {
-            if (bounds.top > tabTopMax) tabTopMax = bounds.top
-            if (bounds.top < tabTopMax - MOVED_PX) removeOverlay() else showOverlay(bounds)
-        }
+        // small black box over the "For you" tab: only while the For you page is showing and the header is in its default position
+        if (bounds != null && bounds.top > tabTopMax) tabTopMax = bounds.top
+        if (bounds == null || forYouShowing != true || bounds.top < tabTopMax - MOVED_PX) removeOverlay() else showOverlay(bounds)
 
         if ((opening || redirectAt != 0L || openRedirectPending) && !pending) {      // come back while a timer runs
             pending = true
@@ -408,6 +414,7 @@ class ForYouBlockerService : AccessibilityService() {
         private const val TAB_ROW_BOTTOM = 0.18f      // the For you / Following row ends here
         private const val LEFT_SHARE = 0.5f           // in that row only the left half is black
         private const val COVER_BOTTOM = 0.88f     // and ends above the bottom menu
+        private const val OPEN_GRACE_MS = 250L       // X opening straight on Following: no black screen within this time
         private const val MOVED_PX = 6
         private const val TAB_WIDTH_MARGIN = 15
         private const val COVER_MAX_MS = 60000L
