@@ -78,18 +78,14 @@ class ForYouBlockerService : AccessibilityService() {
         startCover = null
     }
 
-    private var hidePending = false
-    private val hide = Runnable {
-        hidePending = false
-        removeOverlay()
-    }
-
     private val process = Runnable {
         pending = false
         update()
     }
 
     private var inX = false
+    private var tabTopMax = 0
+    private var lastForce = 0L
     private val redirect = Runnable {
         tapFollowing()
         handler.postDelayed(hideStartCover, AFTER_TAP_MS)      // show the screen again once Following is up
@@ -130,6 +126,7 @@ class ForYouBlockerService : AccessibilityService() {
 
     private fun xClosed() {
         inX = false
+        tabTopMax = 0
         handler.removeCallbacks(redirect)
         removeStartCover()
         removeOverlay()
@@ -153,25 +150,41 @@ class ForYouBlockerService : AccessibilityService() {
         lastPackage = root?.packageName?.toString() ?: "(no window)"
         if (root == null || root.packageName != X_PACKAGE) {
             removeOverlay()
+            tabTopMax = 0
             return
         }
         val forYou = FOR_YOU.firstNotNullOfOrNull { findTab(root, it) }
         val now = System.currentTimeMillis()
+        val bounds = forYou?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
+        val followingBounds = bounds?.let { row ->
+            FOLLOWING.firstNotNullOfOrNull { findFollowingInRow(root, it, row) }?.let { n -> Rect().also { n.getBoundsInScreen(it) } }
+        }
         if (now - lastDumpAt > DUMP_EVERY_MS) {      // keep a readable copy of what X shows, for the in-app report
             lastDumpAt = now
-            lastReport = "For you tab found: ${forYou != null}\n\nNODES MENTIONING For you / Following:\n" +
-                scanTabs(root) + "\nALL TEXT ON SCREEN:\n" + dump(root)
+            lastReport = "For you tab found: ${forYou != null}\n" +
+                "Tab widths: For you=${bounds?.width()} Following=${followingBounds?.width()} (the wider one is the active tab)\n\n" +
+                "NODES MENTIONING For you / Following:\n" + scanTabs(root) + "\nALL TEXT ON SCREEN:\n" + dump(root)
         }
-        if (forYou == null) {
-            if (overlay != null && !hidePending) {      // X redraws its header a lot; only hide if it stays gone
-                hidePending = true
-                handler.postDelayed(hide, HIDE_DELAY_MS)
-            }
+        if (bounds == null) {      // header scrolled away: no box
+            removeOverlay()
             return
         }
-        hidePending = false
-        handler.removeCallbacks(hide)
-        showOverlay(Rect().also { forYou.getBoundsInScreen(it) })      // black box over the "For you" tab (best effort)
+        if (bounds.top > tabTopMax) tabTopMax = bounds.top      // the highest position seen is the default one
+        if (bounds.top < tabTopMax - MOVED_PX) {      // header is moving (scrolling): drop the box until it is back in place
+            removeOverlay()
+            return
+        }
+        showOverlay(bounds)      // black box over the "For you" tab
+
+        // swiped over to the For you page (its tab is the wider one): black out and go back to Following
+        if (followingBounds != null && startCover == null &&
+            bounds.width() > followingBounds.width() + TAB_WIDTH_MARGIN && now - lastForce > FORCE_COOLDOWN_MS
+        ) {
+            lastForce = now
+            showStartCover(FORCE_COVER_MAX_MS)
+            tapFollowing()
+            handler.postDelayed(hideStartCover, AFTER_TAP_MS)
+        }
     }
 
     /** Tap "Following": where X says it is, or (if X cannot be read) where it sits on this phone's screen. */
@@ -329,7 +342,10 @@ class ForYouBlockerService : AccessibilityService() {
         private const val DEBOUNCE_MS = 80L
         private const val COVER_TOP = 0.115f       // black starts under the profile / X logo row (share of the screen height)
         private const val COVER_BOTTOM = 0.872f     // and ends above the bottom menu
-        private const val HIDE_DELAY_MS = 450L
+        private const val MOVED_PX = 6
+        private const val TAB_WIDTH_MARGIN = 15
+        private const val FORCE_COOLDOWN_MS = 1500L
+        private const val FORCE_COVER_MAX_MS = 3000L
         private const val START_COVER_EXTRA_MS = 4000L
         private const val AFTER_TAP_MS = 700L
     }
