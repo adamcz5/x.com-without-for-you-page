@@ -25,12 +25,23 @@ class ForYouBlockerService : AccessibilityService() {
     private var overlayBounds = Rect()
     private var lastAutoClick = 0L
 
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        instance = this
+    }
+
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        instance = null
+        return super.onUnbind(intent)
+    }
+
     private val process = Runnable {
         pending = false
         update()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        eventCount++
         if (pending) return
         pending = true
         handler.postDelayed(process, DEBOUNCE_MS)
@@ -46,11 +57,17 @@ class ForYouBlockerService : AccessibilityService() {
 
     private fun update() {
         val root = rootInActiveWindow
+        lastPackage = root?.packageName?.toString() ?: "(no window)"
         if (root == null || root.packageName != X_PACKAGE) {
             removeOverlay()
             return
         }
-        val forYou = findTab(root, "For you")
+        val forYou = FOR_YOU.firstNotNullOfOrNull { findTab(root, it) }
+        val now0 = System.currentTimeMillis()
+        if (now0 - lastDumpAt > DUMP_EVERY_MS) {      // keep a readable copy of what X shows, for the in-app report
+            lastDumpAt = now0
+            lastReport = "For you tab found: ${forYou != null}\n\n" + dump(root)
+        }
         if (forYou == null) {
             removeOverlay()
             return
@@ -70,6 +87,27 @@ class ForYouBlockerService : AccessibilityService() {
         }
     }
 
+    /** Text and descriptions of everything X exposes on screen (capped), one per line. */
+    private fun dump(root: AccessibilityNodeInfo): String {
+        val sb = StringBuilder()
+        var count = 0
+        fun walk(node: AccessibilityNodeInfo?) {
+            if (node == null || count >= 500) return
+            val t = node.text?.toString()
+            val d = node.contentDescription?.toString()
+            if (!t.isNullOrBlank() || !d.isNullOrBlank()) {
+                count++
+                val b = Rect().also { node.getBoundsInScreen(it) }
+                if (node.isSelected) sb.append("[selected] ")
+                if (node.isClickable) sb.append("[clickable] ")
+                sb.append(t ?: "").append(" | ").append(d ?: "").append("  @").append(b.toShortString()).append('\n')
+            }
+            for (i in 0 until node.childCount) walk(node.getChild(i))
+        }
+        walk(root)
+        return sb.toString()
+    }
+
     private fun label(node: AccessibilityNodeInfo): String =
         (node.text ?: node.contentDescription)?.toString()?.trim().orEmpty()
 
@@ -82,10 +120,12 @@ class ForYouBlockerService : AccessibilityService() {
 
     /** "Following" also appears elsewhere (profiles, buttons), so only accept the one in the same row as "For you". */
     private fun findFollowingInRow(root: AccessibilityNodeInfo, row: Rect): AccessibilityNodeInfo? =
-        root.findAccessibilityNodeInfosByText("Following").firstOrNull {
-            val b = Rect().also { r -> it.getBoundsInScreen(r) }
-            it.isVisibleToUser && label(it).startsWith("Following", ignoreCase = true) &&
-                b.centerY() in row.top..row.bottom && b.left >= row.right - 1
+        FOLLOWING.firstNotNullOfOrNull { name ->
+            root.findAccessibilityNodeInfosByText(name).firstOrNull {
+                val b = Rect().also { r -> it.getBoundsInScreen(r) }
+                it.isVisibleToUser && label(it).startsWith(name, ignoreCase = true) &&
+                    b.centerY() in row.top..row.bottom && b.left >= row.right - 1
+            }
         }
 
     private fun clickableAncestor(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
@@ -135,9 +175,18 @@ class ForYouBlockerService : AccessibilityService() {
         overlay = null
     }
 
-    private companion object {
-        const val X_PACKAGE = "com.twitter.android"
-        const val DEBOUNCE_MS = 80L
-        const val AUTO_CLICK_COOLDOWN_MS = 1000L
+    companion object {
+        @Volatile var instance: ForYouBlockerService? = null
+        @Volatile var eventCount = 0
+        @Volatile var lastPackage = ""
+        @Volatile var lastReport = ""
+        private var lastDumpAt = 0L
+        private const val DUMP_EVERY_MS = 1500L
+        private const val X_PACKAGE = "com.twitter.android"
+        // Tab labels in X's interface languages (the service matches by label, so the phone/app language matters)
+        private val FOR_YOU = listOf("For you", "Pro vás", "Pre vás", "Für dich", "Dla Ciebie", "Para ti", "Pour vous", "Per te", "Para você", "Voor jou")
+        private val FOLLOWING = listOf("Following", "Sledujete", "Sledované", "Folge ich", "Obserwowani", "Siguiendo", "Abonnements", "Seguiti", "Seguindo", "Volgend")
+        private const val DEBOUNCE_MS = 80L
+        private const val AUTO_CLICK_COOLDOWN_MS = 1000L
     }
 }
