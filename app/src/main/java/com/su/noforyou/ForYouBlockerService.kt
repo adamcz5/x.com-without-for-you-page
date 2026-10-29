@@ -58,6 +58,7 @@ class ForYouBlockerService : AccessibilityService() {
     private fun backMs() = prefs().getInt(KEY_BACK_SECONDS, DEFAULT_BACK_SECONDS) * 1000L
 
     // ---- the black screen over the middle of X (profile / X logo row and bottom menu stay visible)
+    private val startParams = ArrayList<WindowManager.LayoutParams>()
     private val startCovers = ArrayList<View>()      // the black screen is two panels: the tab row's left half, and everything under the tab row
     private val hideStartCover = Runnable { removeStartCover() }
 
@@ -65,7 +66,7 @@ class ForYouBlockerService : AccessibilityService() {
         val params = WindowManager.LayoutParams(
             width, height,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.OPAQUE
         ).apply {
@@ -73,9 +74,27 @@ class ForYouBlockerService : AccessibilityService() {
             this.x = x
             this.y = y
         }
-        val v = View(this).apply { setBackgroundColor(Color.BLACK) }
+        val v = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            setOnTouchListener { _, _ -> true }      // the page under the black cannot be scrolled or tapped
+        }
         wm.addView(v, params)
         startCovers.add(v)
+        startParams.add(params)
+    }
+
+    /** Touches are caught only while the tab row is on screen. If the header has scrolled away they pass through, so you can scroll back up. */
+    private fun setCoversTouchable(on: Boolean) {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        for (i in startCovers.indices) {
+            val p = startParams[i]
+            val flags = if (on) p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            else p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            if (flags != p.flags) {
+                p.flags = flags
+                wm.updateViewLayout(startCovers[i], p)
+            }
+        }
     }
 
     private fun showStartCover() {
@@ -96,6 +115,7 @@ class ForYouBlockerService : AccessibilityService() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         for (v in startCovers) wm.removeView(v)
         startCovers.clear()
+        startParams.clear()
     }
 
     private fun coverNow(want: Boolean) {
@@ -213,19 +233,27 @@ class ForYouBlockerService : AccessibilityService() {
                 "NODES MENTIONING For you / Following:\n" + scanTabs(root) + "\nALL TEXT ON SCREEN:\n" + dump(root)
         }
 
+        // the tab row is fully on screen (not scrolled away): only then can we tap Following, and only then the black catches touches
+        val headerOn = followingBounds != null && followingBounds.top >= 0
+
         // black screen: only while the For you page is showing (or, just after X opened, while we cannot tell yet)
         if (forYouShowing == false) openRedirectPending = false      // X opened straight on Following: nothing to do
         if (now >= holdOffUntil) coverNow(black() && (forYouShowing == true || (opening && forYouShowing == null && now - openedAt >= OPEN_GRACE_MS)))
 
+        setCoversTouchable(headerOn)
+
         // redirect
         if (redirectOn()) {
             if (openRedirectPending && !opening) {      // the opening time is over
-                openRedirectPending = false
-                if (forYouShowing != false) redirectNow(now)
+                if (forYouShowing == false) openRedirectPending = false
+                else if (headerOn) {
+                    openRedirectPending = false
+                    redirectNow(now)
+                }
             } else if (!opening) {
                 if (forYouShowing == true && redirectAt == 0L && now >= holdOffUntil) redirectAt = now + backMs()      // landed on For you
                 if (forYouShowing == false) redirectAt = 0L
-                if (redirectAt != 0L && now >= redirectAt) redirectNow(now)
+                if (redirectAt != 0L && now >= redirectAt && headerOn) redirectNow(now)
             }
         } else {
             openRedirectPending = false
@@ -319,12 +347,12 @@ class ForYouBlockerService : AccessibilityService() {
         (node.text ?: node.contentDescription)?.toString()?.trim().orEmpty()
 
     /** All visible nodes whose label starts with [name] (own tree walk: the system's text search missed X's tabs). */
-    private fun findNodes(root: AccessibilityNodeInfo, name: String): List<AccessibilityNodeInfo> {
+    private fun findNodes(root: AccessibilityNodeInfo, name: String, onlyVisible: Boolean = true): List<AccessibilityNodeInfo> {
         val out = ArrayList<AccessibilityNodeInfo>()
         fun walk(node: AccessibilityNodeInfo?) {
             if (node == null) return
             val l = label(node)
-            if (node.isVisibleToUser && l.startsWith(name, ignoreCase = true) && l.length <= name.length + 40) out.add(node)
+            if ((!onlyVisible || node.isVisibleToUser) && l.startsWith(name, ignoreCase = true) && l.length <= name.length + 40) out.add(node)
             for (i in 0 until node.childCount) walk(node.getChild(i))
         }
         walk(root)
@@ -339,14 +367,14 @@ class ForYouBlockerService : AccessibilityService() {
     /** The tab near the top of the screen; of several matches (the tab view and its text) the biggest one. */
     private fun findTab(root: AccessibilityNodeInfo, name: String): AccessibilityNodeInfo? {
         val maxTop = resources.displayMetrics.heightPixels * 0.3
-        return findNodes(root, name)
+        return findNodes(root, name, onlyVisible = false)
             .filter { Rect().also { r -> it.getBoundsInScreen(r) }.top < maxTop }
             .maxByOrNull { area(it) }
     }
 
     /** "Following" also appears elsewhere (profiles, buttons), so only accept the one in the same row, right of "For you". */
     private fun findFollowingInRow(root: AccessibilityNodeInfo, name: String, row: Rect): AccessibilityNodeInfo? =
-        findNodes(root, name).filter {
+        findNodes(root, name, onlyVisible = false).filter {
             val b = Rect().also { r -> it.getBoundsInScreen(r) }
             b.centerY() in row.top..row.bottom && b.left >= row.right - 1
         }.maxByOrNull { area(it) }
