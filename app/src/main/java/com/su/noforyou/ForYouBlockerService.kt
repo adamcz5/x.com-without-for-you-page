@@ -70,8 +70,8 @@ class ForYouBlockerService : AccessibilityService() {
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, (h * COVER_BOTTOM).toInt() - top,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.OPAQUE
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -93,15 +93,6 @@ class ForYouBlockerService : AccessibilityService() {
 
     private fun coverNow(want: Boolean) {
         if (want) showStartCover() else removeStartCover()
-    }
-
-    /** The cover catches touches; while our own tap on "Following" is sent it must let them through. */
-    private fun setCoverTouchable(on: Boolean) {
-        val v = startCover ?: return
-        val p = coverParams ?: return
-        p.flags = if (on) p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-        else p.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-        (getSystemService(WINDOW_SERVICE) as WindowManager).updateViewLayout(v, p)
     }
 
     // ---- when to do what
@@ -260,16 +251,15 @@ class ForYouBlockerService : AccessibilityService() {
             }
         }
         val path = Path().apply { moveTo(x, y) }
-        setCoverTouchable(false)
+        val base = "tap at ${x.toInt()},${y.toInt()}"
         val sent = dispatchGesture(
             GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, 60)).build(),
             object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) = setCoverTouchable(true)
-                override fun onCancelled(gestureDescription: GestureDescription?) = setCoverTouchable(true)
+                override fun onCompleted(gestureDescription: GestureDescription?) { lastTap = "$base: done" }
+                override fun onCancelled(gestureDescription: GestureDescription?) { lastTap = "$base: cancelled by Android" }
             }, null
         )
-        lastTap = "tap at ${x.toInt()},${y.toInt()} sent=$sent"
-        handler.postDelayed({ setCoverTouchable(true) }, 800)      // in case no callback comes
+        lastTap = "$base: sent=$sent"
     }
 
     /** Every node whose text or description mentions the tab names, with its details. */
