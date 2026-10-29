@@ -9,6 +9,7 @@ import android.content.IntentFilter
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -51,13 +52,19 @@ class ForYouBlockerService : AccessibilityService() {
     private fun showStartCover(maxMs: Long) {
         if (startCover != null) return
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        // black over the middle only: the top bar (profile, X logo) and the bottom menu stay visible
+        val h = if (Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds.height() else resources.displayMetrics.heightPixels
+        val top = (h * COVER_TOP).toInt()
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT, (h * COVER_BOTTOM).toInt() - top,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.OPAQUE
-        )
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            y = top
+        }
         val v = View(this).apply { setBackgroundColor(Color.BLACK) }
         wm.addView(v, params)
         startCover = v
@@ -320,6 +327,8 @@ class ForYouBlockerService : AccessibilityService() {
         private val FOR_YOU = listOf("For you", "Pro vás", "Pre vás", "Für dich", "Dla Ciebie", "Para ti", "Pour vous", "Per te", "Para você", "Voor jou")
         private val FOLLOWING = listOf("Following", "Sledujete", "Sledované", "Folge ich", "Obserwowani", "Siguiendo", "Abonnements", "Seguiti", "Seguindo", "Volgend")
         private const val DEBOUNCE_MS = 80L
+        private const val COVER_TOP = 0.115f       // black starts under the profile / X logo row (share of the screen height)
+        private const val COVER_BOTTOM = 0.872f     // and ends above the bottom menu
         private const val HIDE_DELAY_MS = 450L
         private const val START_COVER_EXTRA_MS = 4000L
         private const val AFTER_TAP_MS = 700L
