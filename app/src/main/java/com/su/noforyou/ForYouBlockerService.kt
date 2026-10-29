@@ -407,7 +407,7 @@ class ForYouBlockerService : AccessibilityService() {
         private const val COVER_TOP = 0.115f       // black starts under the profile / X logo row (share of the screen height)
         private const val TAB_ROW_BOTTOM = 0.18f      // the For you / Following row ends here
         private const val LEFT_SHARE = 0.5f           // in that row only the left half is black
-        private const val COVER_BOTTOM = 0.872f     // and ends above the bottom menu
+        private const val COVER_BOTTOM = 0.88f     // and ends above the bottom menu
         private const val MOVED_PX = 6
         private const val TAB_WIDTH_MARGIN = 15
         private const val COVER_MAX_MS = 60000L
