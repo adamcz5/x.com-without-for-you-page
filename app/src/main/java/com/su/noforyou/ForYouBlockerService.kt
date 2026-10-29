@@ -200,7 +200,7 @@ class ForYouBlockerService : AccessibilityService() {
         val existing = overlay
         if (existing == null) {
             val v = View(this).apply {
-                setBackgroundColor(Color.argb(235, 20, 20, 20))
+                setBackgroundColor(Color.BLACK)
                 setOnTouchListener { _, _ -> true }
             }
             wm.addView(v, params)
