@@ -1,12 +1,14 @@
 package com.su.noforyou
 
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
+import android.content.ContentProvider
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageInstaller
-import android.os.Build
-import android.widget.Toast
+import android.database.Cursor
+import android.database.MatrixCursor
+import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -46,43 +48,25 @@ object Updater {
         if (conn.responseCode != 200) throw IOException("Download failed (${conn.responseCode})")
         conn.inputStream.use { input -> file.outputStream().use { input.copyTo(it) } }
 
-        val installer = context.packageManager.packageInstaller
-        val id = installer.createSession(PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL))
-        installer.openSession(id).use { session ->
-            file.inputStream().use { input ->
-                session.openWrite("update.apk", 0, file.length()).use { out ->
-                    input.copyTo(out)
-                    session.fsync(out)
-                }
-            }
-            val pi = PendingIntent.getBroadcast(
-                context, id, Intent(context, InstallReceiver::class.java),
-                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            session.commit(pi.intentSender)
-        }
+        // hand the file to the system's install screen (installing it through our own session is refused for self-updates)
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(Uri.parse("content://com.su.noforyou.apk/update.apk"), "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
     }
 }
 
-/** Receives the installer's answer: shows the system "Install?" screen, or the error. */
-class InstallReceiver : BroadcastReceiver() {
-    override fun onReceive(context: Context, intent: Intent) {
-        when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)) {
-            PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                val confirm = if (Build.VERSION.SDK_INT >= 33)
-                    intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
-                else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_INTENT)
-                confirm?.let {
-                    it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(it)
-                }
-            }
-            PackageInstaller.STATUS_SUCCESS -> Unit
-            else -> Toast.makeText(
-                context,
-                "Update not installed: " + (intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "unknown error"),
-                Toast.LENGTH_LONG
-            ).show()
-        }
-    }
+/** Serves the downloaded APK (cache/update.apk) to the system installer. */
+class ApkProvider : ContentProvider() {
+    private fun apk() = File(context!!.cacheDir, "update.apk")
+    override fun onCreate() = true
+    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor =
+        ParcelFileDescriptor.open(apk(), ParcelFileDescriptor.MODE_READ_ONLY)
+    override fun query(uri: Uri, projection: Array<String>?, selection: String?, selectionArgs: Array<String>?, sortOrder: String?): Cursor =
+        MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)).apply { addRow(arrayOf<Any>("update.apk", apk().length())) }
+    override fun getType(uri: Uri) = "application/vnd.android.package-archive"
+    override fun insert(uri: Uri, values: ContentValues?): Uri? = null
+    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<String>?) = 0
+    override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<String>?) = 0
 }
+
