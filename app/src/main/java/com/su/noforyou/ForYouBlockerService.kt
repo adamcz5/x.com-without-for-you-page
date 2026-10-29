@@ -58,37 +58,44 @@ class ForYouBlockerService : AccessibilityService() {
     private fun backMs() = prefs().getInt(KEY_BACK_SECONDS, DEFAULT_BACK_SECONDS) * 1000L
 
     // ---- the black screen over the middle of X (profile / X logo row and bottom menu stay visible)
-    private var startCover: View? = null
-    private var coverParams: WindowManager.LayoutParams? = null
+    private val startCovers = ArrayList<View>()      // the black screen is two panels: the tab row's left half, and everything under the tab row
     private val hideStartCover = Runnable { removeStartCover() }
 
-    private fun showStartCover() {
-        if (startCover != null) return
-        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val h = if (Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds.height() else resources.displayMetrics.heightPixels
-        val top = (h * COVER_TOP).toInt()
+    private fun addCover(wm: WindowManager, x: Int, y: Int, width: Int, height: Int) {
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT, (h * COVER_BOTTOM).toInt() - top,
+            width, height,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.OPAQUE
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            y = top
+            this.x = x
+            this.y = y
         }
         val v = View(this).apply { setBackgroundColor(Color.BLACK) }
         wm.addView(v, params)
-        startCover = v
-        coverParams = params
+        startCovers.add(v)
+    }
+
+    private fun showStartCover() {
+        if (startCovers.isNotEmpty()) return
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val size = if (Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds else Rect(0, 0, resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+        val top = (size.height() * COVER_TOP).toInt()
+        val tabRowBottom = (size.height() * TAB_ROW_BOTTOM).toInt()
+        val bottom = (size.height() * COVER_BOTTOM).toInt()
+        // black over the middle only (profile / X logo row and bottom menu stay visible); the right half of the tab row stays free for "Following"
+        addCover(wm, 0, top, (size.width() * LEFT_SHARE).toInt(), tabRowBottom - top)
+        addCover(wm, 0, tabRowBottom, WindowManager.LayoutParams.MATCH_PARENT, bottom - tabRowBottom)
         handler.postDelayed(hideStartCover, COVER_MAX_MS)      // never stay black for long, whatever happens
     }
 
     private fun removeStartCover() {
         handler.removeCallbacks(hideStartCover)
-        val v = startCover ?: return
-        (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(v)
-        startCover = null
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        for (v in startCovers) wm.removeView(v)
+        startCovers.clear()
     }
 
     private fun coverNow(want: Boolean) {
@@ -398,6 +405,8 @@ class ForYouBlockerService : AccessibilityService() {
         private val FOLLOWING = listOf("Following", "Sledujete", "Sledované", "Folge ich", "Obserwowani", "Siguiendo", "Abonnements", "Seguiti", "Seguindo", "Volgend")
         private const val DEBOUNCE_MS = 80L
         private const val COVER_TOP = 0.115f       // black starts under the profile / X logo row (share of the screen height)
+        private const val TAB_ROW_BOTTOM = 0.18f      // the For you / Following row ends here
+        private const val LEFT_SHARE = 0.5f           // in that row only the left half is black
         private const val COVER_BOTTOM = 0.872f     // and ends above the bottom menu
         private const val MOVED_PX = 6
         private const val TAB_WIDTH_MARGIN = 15
