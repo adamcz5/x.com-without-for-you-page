@@ -11,8 +11,8 @@ android {
         applicationId = "com.su.noforyou"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = (project.findProperty("vc") as String?)?.toIntOrNull() ?: 1
+        versionName = "1.2"
     }
 
     signingConfigs {

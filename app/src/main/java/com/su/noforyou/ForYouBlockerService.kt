@@ -56,6 +56,10 @@ class ForYouBlockerService : AccessibilityService() {
     }
 
     private fun update() {
+        if (!getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_ENABLED, true)) {      // switched off in the app
+            removeOverlay()
+            return
+        }
         val root = rootInActiveWindow
         lastPackage = root?.packageName?.toString() ?: "(no window)"
         if (root == null || root.packageName != X_PACKAGE) {
@@ -181,6 +185,8 @@ class ForYouBlockerService : AccessibilityService() {
         @Volatile var lastPackage = ""
         @Volatile var lastReport = ""
         private var lastDumpAt = 0L
+        const val PREFS = "prefs"
+        const val KEY_ENABLED = "enabled"
         private const val DUMP_EVERY_MS = 1500L
         private const val X_PACKAGE = "com.twitter.android"
         // Tab labels in X's interface languages (the service matches by label, so the phone/app language matters)

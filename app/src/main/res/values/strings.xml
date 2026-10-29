@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">No For You</string>
+    <string name="app_name">X For You Page Blocker</string>
     <string name="service_description">Hides the For You tab in the X app and keeps it on Following. Only looks at the X app.</string>
 </resources>

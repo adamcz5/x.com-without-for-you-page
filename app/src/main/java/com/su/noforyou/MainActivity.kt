@@ -9,27 +9,45 @@ import android.provider.Settings
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Switch
 import android.widget.TextView
 
 class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var report: TextView
+    private lateinit var updateStatus: TextView
+    private lateinit var updateButton: Button
+    private var found: Updater.Release? = null
+
+    @Suppress("DEPRECATION")
+    private fun installedBuild(): Int = packageManager.getPackageInfo(packageName, 0).versionCode
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val pad = (16 * resources.displayMetrics.density).toInt()
+        val prefs = getSharedPreferences(ForYouBlockerService.PREFS, MODE_PRIVATE)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
         }
         layout.addView(TextView(this).apply {
-            textSize = 15f
-            text = "1. Tap \"Enable\" and turn on \"No For You\" under Accessibility " +
-                "(Installed apps / Downloaded apps).\n" +
-                "2. Use the normal X app. The For You tab is covered and X stays on Following."
+            textSize = 20f
+            text = getString(R.string.app_name)
+        })
+        layout.addView(Switch(this).apply {
+            text = "Block the For You tab"
+            textSize = 16f
+            isChecked = prefs.getBoolean(ForYouBlockerService.KEY_ENABLED, true)
+            setPadding(0, pad, 0, pad)
+            setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean(ForYouBlockerService.KEY_ENABLED, on).apply() }
+        })
+        layout.addView(TextView(this).apply {
+            textSize = 14f
+            text = "First turn on the service: tap \"Open Accessibility settings\" and enable " +
+                "\"${getString(R.string.app_name)}\" (Installed / Downloaded apps)."
         })
         layout.addView(Button(this).apply {
-            text = "Enable"
+            text = "Open Accessibility settings"
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
         })
         layout.addView(Button(this).apply {
@@ -38,22 +56,40 @@ class MainActivity : Activity() {
                 packageManager.getLaunchIntentForPackage("com.twitter.android")?.let(::startActivity)
             }
         })
-        status = TextView(this).apply { textSize = 14f; setPadding(0, pad, 0, pad / 2) }
+
+        updateStatus = TextView(this).apply {
+            textSize = 14f
+            setPadding(0, pad, 0, 0)
+            text = "Installed build: ${installedBuild()}"
+        }
+        layout.addView(updateStatus)
+        layout.addView(Button(this).apply {
+            text = "Check for update"
+            setOnClickListener { checkUpdate() }
+        })
+        updateButton = Button(this).apply {
+            text = "Update now"
+            visibility = android.view.View.GONE
+            setOnClickListener { doUpdate() }
+        }
+        layout.addView(updateButton)
+
+        status = TextView(this).apply { textSize = 13f; setPadding(0, pad, 0, pad / 2) }
         layout.addView(status)
         layout.addView(Button(this).apply {
-            text = "Refresh"
+            text = "Refresh report"
             setOnClickListener { refresh() }
         })
         layout.addView(Button(this).apply {
             text = "Copy report"
             setOnClickListener {
                 val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("No For You report", status.text.toString() + "\n\n" + report.text))
+                cm.setPrimaryClip(ClipData.newPlainText("report", status.text.toString() + "\n\n" + report.text))
             }
         })
         report = TextView(this).apply { textSize = 11f; setTextIsSelectable(true) }
-        layout.addView(ScrollView(this).apply { addView(report) })
-        setContentView(layout)
+        layout.addView(report)
+        setContentView(ScrollView(this).apply { addView(layout) })
     }
 
     override fun onResume() {
@@ -66,7 +102,41 @@ class MainActivity : Activity() {
         status.text = "Service running: $running\n" +
             "Events seen: ${ForYouBlockerService.eventCount}\n" +
             "Last app in front: ${ForYouBlockerService.lastPackage.ifEmpty { "-" }}\n" +
-            "Version 1.1 - open X for a few seconds, come back here and tap Refresh."
+            "To fill the report: open X for a few seconds, come back, tap Refresh."
         report.text = ForYouBlockerService.lastReport.ifEmpty { "(nothing from X yet)" }
+    }
+
+    private fun checkUpdate() {
+        updateStatus.text = "Checking for update..."
+        Thread {
+            try {
+                val r = Updater.latest()
+                runOnUiThread {
+                    if (r.build > installedBuild()) {
+                        found = r
+                        updateStatus.text = "New build ${r.build} available (installed: ${installedBuild()})"
+                        updateButton.visibility = android.view.View.VISIBLE
+                    } else {
+                        updateStatus.text = "Up to date (build ${installedBuild()})"
+                        updateButton.visibility = android.view.View.GONE
+                    }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { updateStatus.text = "Update check failed: ${e.message}" }
+            }
+        }.start()
+    }
+
+    private fun doUpdate() {
+        val r = found ?: return
+        updateStatus.text = "Downloading build ${r.build}..."
+        Thread {
+            try {
+                Updater.downloadAndInstall(this, r)
+                runOnUiThread { updateStatus.text = "Downloaded. Android will ask you to confirm the install." }
+            } catch (e: Exception) {
+                runOnUiThread { updateStatus.text = "Update failed: ${e.message}" }
+            }
+        }.start()
     }
 }
